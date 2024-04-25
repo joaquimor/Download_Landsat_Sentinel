@@ -1,0 +1,547 @@
+# PARÂMETROS DE ENTRADA (OBRIGATÓRIOS)
+# ID da propriedade
+ID = 'Alterar_Para_ID_do_Projeto
+
+# Fuso da propriedade
+fuso_para_utm = '22' #
+
+# Caminho dos arquivos criados
+url = '/content/drive/MyDrive/PROJETOS/IMG_SENTINEL/'
+
+# Download de imagens Sentinel-2 (S/N) ?
+download_st2 = 'S'
+
+# PARÂMETROS DE ENTRADA (OPCIONAIS)
+# Data mínima e máxima para a busca para as imagens Landsat-5
+min_data_l5 = '2006-01-01'
+max_data_l5 = '2008-07-21'
+
+# Data mínima para a busca para as imagens Landsat-9 (a máxima está programada para ser a mais atual)
+min_data_l9 = '2020-01-01'
+
+# Data mínima para a busca para as imagens Sentinel-2 (a máxima está programada para ser a mais atual)
+min_data_st2 = '2020-01-01'
+
+
+#Aqui será necessário autorizar o uso do Google Drive. Não é sempre que será necessário autorizar, normalmente uma vez
+#por sessão
+
+from google.colab import drive, files
+drive.mount('/content/drive/')
+
+#Toda a etapa de preparação do ambiente de trabalho será desenvolvida na célula abaixo. Em resumo, ela será responsável por instalar/instanciar os pacotes 
+#utilizados, criar a pasta do projeto, fazer o upload da(s) matrícula(s), definir a coordenada padrão para WGS84 (EPSG:4326) e fazer 
+#a conexão com o Computador Planetário.
+
+#@title
+# Instala os pacotes necessários
+!pip install geopandas rasterio pystac_client planetary_computer -q
+
+# Instancia as bibliotecas para uso
+import pandas as pd
+from datetime import date
+import geopandas as gpd
+import rasterio as rio
+import pystac_client, planetary_computer, glob, os, sys, warnings
+
+from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio import mask
+
+# Ignora possíveis avisos desnecessários
+warnings.filterwarnings('ignore')
+
+# Para plotar as imagens...
+import matplotlib.pyplot as plt
+from rasterio import plot as rasterplot
+
+# Opções de visualização dos dataframes
+pd.set_option('display.max_colwidth', None)
+pd.set_option('display.max_rows', None)
+pd.set_option('display.max_columns', None)
+
+####################################################
+
+# Acessa o caminho no drive (indicado acima)
+os.chdir(url)
+
+# Indica o caminho com o ID do projeto
+url_id = url + ID + '/'
+
+# Cria a pasta com o ID do projeto
+if os.path.isdir(url_id):
+  os.chdir(url_id)
+  print(f'\nID já existe! \n{url_id}')
+else:
+  os.makedirs(ID, exist_ok=True)
+  os.chdir(url_id)
+  print(f'\nPasta criada com sucesso! \n{url_id}')
+
+# Realiza o upload do shapefile de busca
+shp = glob.glob(url_id+'/*.shp')
+if not shp:
+  print('\nFazer o upload da matrícula:')
+  files.upload()
+  shp = glob.glob(url_id+'/*.shp')
+  print(f'\nUpload realizado com sucesso! \n{shp[0]}')
+else:
+  print(f'\nShapefile encontrado: \n{shp[0]}')
+
+limite = gpd.read_file(shp[0])
+
+####################################################
+
+# Acessa o shapefile
+mat = gpd.read_file(shp[0])
+
+# Cria uma Bounding Box da área de interesse (minx, miny, maxx, maxy)
+bbox = [mat.bounds.minx.values[0], mat.bounds.miny.values[0], mat.bounds.maxx.values[0], mat.bounds.maxy.values[0]]
+
+####################################################
+
+# Cria uma string com a data de hoje
+today = date.today()
+today_format = f'{today.year}-{today.month:02d}-{today.day:02d}'
+
+# Faz a conexão com o Computador Planetário da Microsoft
+catalog = pystac_client.Client.open(
+    'https://planetarycomputer.microsoft.com/api/stac/v1',
+    modifier = planetary_computer.sign_inplace)
+
+####################################################
+
+# Define a projeção padrão
+dst_crs = rio.crs.CRS.from_epsg(4326) #Geográfica, WGS84
+
+#Definição das funções
+#@title
+# Função para plotar o limite da matrícula sobreposta na imagem raster definida
+def plotImage(shapefile, raster):
+  fig, ax = plt.subplots(ncols=2, nrows=1, figsize=(12, 7))
+
+  #Imagem 1. Foco na propriedade
+  ax[0].set_title('Limite da propriedade', fontsize=12) #imprime o título da figura
+  mat_utm = shapefile.to_crs(str(raster.crs)) #faz uma cópia do limite da propriedade e muda a coordenada de acordo com a projeção da raster
+  ax[0].set_xlim(mat_utm.bounds.minx.values[0]-750, mat_utm.bounds.maxx.values[0]+750) #limita o valor mínimo e máximo da longitude
+  ax[0].set_ylim(mat_utm.bounds.miny.values[0]-750, mat_utm.bounds.maxy.values[0]+750) #limita o valor mínimo e máximo da latitude
+  mat_utm.boundary.plot(ax=ax[0], linewidth=3.0, color='black') #plota o limite da propriedade
+  rasterplot.show(raster, ax=ax[0]) #plota a raster raster
+
+  #Imagem 2. Foco na raster Sentinel-2
+  ax[1].set_title(titulo, fontsize=12) #imprime o título da figura
+  mat_utm.boundary.plot(ax=ax[1], linewidth=3.0, color='red') #plota o limite da propriedade
+  rasterplot.show(raster, ax=ax[1]) #plota a raster raster
+
+  plt.show()
+
+####################################################
+
+# Função para criar a composição RGB da imagem escolhida
+def compositeBands(Filename, R, G, B):
+  with rio.open(Filename, 'w', driver='Gtiff', width=R.width, height=R.height,
+                count=3, crs=R.crs, transform=R.transform, dtype=R.dtypes[0]) as RGB:
+
+                RGB.write(R.read(1),1)
+                RGB.write(G.read(1),2)
+                RGB.write(B.read(1),3)
+                RGB.close()
+
+####################################################
+
+# Função para reprojetar a composição RGB da imagem escolhida
+def reprojectRaster(src_file, dst_file, dst_crs):
+  with rio.open(src_file) as src:
+    transform, width, height = calculate_default_transform(src.crs, dst_crs, src.width, src.height, *src.bounds)
+    kwargs = src.meta.copy()
+    kwargs.update({
+        'crs': dst_crs,
+        'transform': transform,
+        'width': width,
+        'height': height
+    })
+
+    with rio.open(dst_file, 'w', **kwargs) as dst:
+        for i in range(1, src.count + 1):
+            reproject(
+                source=rio.band(src, i),
+                destination=rio.band(dst, i),
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=transform,
+                dst_crs=dst_crs,
+                resampling=Resampling.nearest)
+
+
+
+# Função para recortar imagem DEM
+def cutRaster(Filename, Mask, Output):
+  with rio.open(Filename) as src:
+    out_image, out_transform = mask.mask(src, Mask, crop=True)
+    kwargs = src.meta.copy()
+    kwargs.update({'driver': 'GTiff',
+                     'height': out_image.shape[1],
+                     'width': out_image.shape[2],
+                     'transform': out_transform
+                   })
+
+    with rio.open(Output, 'w', **kwargs) as dest:
+      dest.write(out_image)
+
+####################################################
+
+# Função para definir o EPSG da DEM
+def defineEPSG(fuso):
+  if fuso == '18':
+    demEPSG = rio.crs.CRS.from_epsg(32718)
+    return demEPSG
+
+  elif fuso == '19':
+    demEPSG = rio.crs.CRS.from_epsg(32719)
+    return demEPSG
+
+  elif fuso == '20':
+    demEPSG = rio.crs.CRS.from_epsg(32720)
+    return demEPSG
+
+  elif fuso == '21':
+    demEPSG = rio.crs.CRS.from_epsg(32721)
+    return demEPSG
+
+  elif fuso == '22':
+    demEPSG = rio.crs.CRS.from_epsg(32722)
+    return demEPSG
+
+  elif fuso == '23':
+    demEPSG = rio.crs.CRS.from_epsg(32723)
+    return demEPSG
+
+  elif fuso == '24':
+    demEPSG = rio.crs.CRS.from_epsg(32724)
+    return demEPSG
+
+  elif fuso == '25':
+    demEPSG = rio.crs.CRS.from_epsg(32725)
+    return demEPSG
+
+  else:
+    print(f'Fuso {fuso} não encontrado.')
+
+#Altimetria
+
+#@title
+search = catalog.search(collections=['nasadem'], bbox=bbox)
+items = search.get_all_items()
+
+if len(items) >= 2:
+  print(f'ATENÇÃO! Foram encontrados {len(items)} imagens de elevação para a propriedade avaliada.\n')
+  altValues = []
+
+  for i in range(len(items)):
+    selected_item = items[i]
+    print(f'Link para download (se necessário...): \n{selected_item.assets["elevation"].href}')
+    # Cria uma variável com o nome do arquivo
+    demName = selected_item.id
+    # Seleciona o caminho e recorta a imagem
+    imgPath = selected_item.assets['elevation'].href
+    cutRaster(Filename=imgPath, Mask=limite['geometry'], Output = demName)
+    # Faz a leitura da imagem recortada e elimita valores iguais ou menores que zero
+    demPath = url_id + demName
+    dem = rio.open(demPath)
+    dem = dem.read(1)
+    dem = dem[dem > 0]
+    # Reprojeta arquivo
+    demEPSG = defineEPSG(fuso=fuso_para_utm)
+    demPath_utm = url_id + demName + f'_UTM_WGS84_{fuso_para_utm}S'
+    reprojectRaster(src_file=demPath, dst_file=demPath_utm, dst_crs=demEPSG)
+    # Faz a leitura da imagem projetada e elimita valores iguais ou menores que zero
+    dem_utm = rio.open(demPath_utm)
+    dem_utm =dem_utm.read(1)
+    dem_utm = dem[dem > 0]
+    # Salva valores de altitude para obter mínimo e máximo
+    altValues.append(dem_utm.min())
+    altValues.append(dem_utm.max())
+    # Apaga a imagem DEM criada anteriormente
+    os.remove(demPath)
+    os.remove(demPath_utm)
+  # Cria e exporta um dataframe com os valores encontrados
+  dfTemp = {'Altitude': ['Mínima', min(altValues)],
+            ' ': ['Máxima', max(altValues)]}
+  df = pd.DataFrame(dfTemp)
+  dfPath = url_id + ID + '_ALTITUDE.xlsx'
+  df.to_excel(dfPath, encoding='UTF-8', index=False)
+
+else:
+  selected_item = items[0]
+  print(f'Link para download (se necessário...): \n{selected_item.assets["elevation"].href}')
+  # Cria uma variável com o nome do arquivo
+  demName = selected_item.id
+  # Seleciona o caminho e recorta a imagem
+  imgPath = selected_item.assets['elevation'].href
+  cutRaster(Filename=imgPath, Mask=limite['geometry'], Output=demName)
+  # Faz a leitura da imagem recortada e elimita valores iguais ou menores que zero
+  demPath = url_id + demName
+  dem = rio.open(demPath)
+  dem = dem.read(1)
+  dem = dem[dem > 0]
+  # Reprojeta arquivo
+  demEPSG = defineEPSG(fuso=fuso_para_utm)
+  demPath_utm = url_id + demName + f'_UTM_WGS84_{fuso_para_utm}S'
+  reprojectRaster(src_file=demPath, dst_file=demPath_utm, dst_crs=demEPSG)
+  # Faz a leitura da imagem projetada e elimita valores iguais ou menores que zero
+  dem_utm = rio.open(demPath_utm)
+  dem_utm =dem_utm.read(1)
+  dem_utm = dem[dem > 0]
+  # Cria e exporta um dataframe com os valores encontrados
+  dfTemp = {'Altitude': ['Mínima', dem_utm.min()],
+            ' ': ['Máxima', dem_utm.max()]}
+  df = pd.DataFrame(dfTemp)
+  dfPath = url_id + ID + '_ALTITUDE.xlsx'
+  df.to_excel(dfPath, encoding='UTF-8', index=False)
+  # Apaga a imagem DEM criada anteriormente
+  os.remove(demPath)
+  os.remove(demPath_utm)
+
+print('\n...')
+print('Procedimento finalizado e pronto para seguir!')
+
+#Imagens Landsat-5 (RGB/543)
+
+#@title
+# Define a data de busca
+timeRange = min_data_l5 + '/' + max_data_l5
+
+# Faz a busca de acordo com os parâmetros indicados
+search = catalog.search(
+    collections = ['landsat-c2-l2'],
+    bbox = bbox,
+    datetime = timeRange,
+    query = {
+        'eo:cloud_cover': {'lt': 90},
+        'platform': {'in': ['landsat-5']}})
+
+# Seleciona todos os itens encontrados conforme a busca
+items = search.get_all_items()
+print(f'Número de imagens Landsat-5 encontradas: {len(items)}\n')
+
+# Cria um dataframe de acordo com as informações encontradas
+df = gpd.GeoDataFrame.from_features(items.to_dict(), crs='epsg:4326')
+df[['datetime', 'landsat:scene_id'	,'eo:cloud_cover']]
+
+#@title
+lt5 = int(input('Escolha uma imagem Landsat-5 (apenas o número): '))
+selected_item = items[lt5]
+
+print(f'\nVocê escolheu a imagem {selected_item.id} com data de {selected_item.datetime.date()} e com {round(selected_item.properties["eo:cloud_cover"], 2)}% de nuvem. Vamos visualizar a cena...\n')
+
+imageName_temp = selected_item.id.split('_')
+imageName = f'{imageName_temp[0]}_{imageName_temp[2]}_{imageName_temp[3]}.tif'
+imageName_proj = f'{imageName.split(".")[0]}_WGS84.tif'
+titulo = f'Imagem TM/Landsat-5 de {imageName_temp[3][6:8]}/{imageName_temp[3][4:6]}/{imageName_temp[3][0:4]}'
+imageName_final = f'situacao passado Imagem TM Landsat-5 de {imageName_temp[3][6:8]}.{imageName_temp[3][4:6]}.{imageName_temp[3][0:4]}.tif'
+
+B03 = rio.open(selected_item.assets['red'].href)
+B04 = rio.open(selected_item.assets['nir08'].href)
+B05 = rio.open(selected_item.assets['swir16'].href)
+
+plotImage(shapefile=mat, raster=B05)
+
+#@title
+resp = str(input('Seguir com o resultado (S/N): '))
+resp = resp.upper().replace(' ', '')
+if resp == 'S':
+  print('\nSeguimos com o script (composição e reprojeção da imagem)...')
+  pass
+else:
+  print('Interrompendo execução...\n\n')
+  sys.exit()
+
+#COMPOSIÇÃO RGB543 PARA IMAGENS LANDSAT 5
+compositeBands(imageName, R=B05, G=B04, B=B03)
+
+path_file = url_id + imageName_proj
+reprojectRaster(src_file=imageName, dst_file=path_file, dst_crs=dst_crs)
+
+os.rename(imageName_proj, imageName_final)
+
+removePath = url_id + imageName
+os.remove(removePath)
+
+print('\n...')
+print('Procedimento finalizado e pronto para seguir!')
+
+#LandSat-9 (RBG/654)
+
+#@title
+timeRange = min_data_l9 + '/' + today_format # AJUSTAR DATA DE ACORDO COM A NECESSIDADE!
+
+# Faz a busca de acordo com os parâmetros indicados
+search = catalog.search(
+    collections = ['landsat-c2-l2'],
+    bbox = bbox,
+    datetime = timeRange,
+    query = {
+        'eo:cloud_cover': {'lt': 90},
+        'platform': {'in': ['landsat-9']}})
+
+items = search.get_all_items()
+
+print(f'Número de imagens Landsat-9 encontradas: {len(items)}\n')
+
+####################################################
+
+df = gpd.GeoDataFrame.from_features(items.to_dict(), crs='epsg:4326')
+
+df[['datetime', 'landsat:scene_id'	,'eo:cloud_cover']]
+
+#@title
+lt8 = int(input('Escolha uma imagem Landsat-9 (apenas o número): '))
+selected_item = items[lt8]
+
+print(f'\nVocê escolheu a imagem {selected_item.id} com data de {selected_item.datetime.date()} e com {round(selected_item.properties["eo:cloud_cover"], 2)}% de nuvem. Vamos visualizar a cena...\n')
+
+imageName_temp = selected_item.id.split('_')
+imageName = f'{imageName_temp[0]}_{imageName_temp[2]}_{imageName_temp[3]}.tif'
+imageName_proj = f'{imageName.split(".")[0]}_WGS84.tif'
+titulo = f'Imagem OLI/Landsat-9 de {imageName_temp[3][6:8]}/{imageName_temp[3][4:6]}/{imageName_temp[3][0:4]}'
+imageName_final = f'situacao presente Imagem OLI Landsat-9 de {imageName_temp[3][6:8]}.{imageName_temp[3][4:6]}.{imageName_temp[3][0:4]}.tif'
+
+B04 = rio.open(selected_item.assets['red'].href)
+B05 = rio.open(selected_item.assets['nir08'].href)
+B06 = rio.open(selected_item.assets['swir16'].href)
+
+plotImage(shapefile=mat, raster=B04)
+
+#@title
+resp = str(input('Seguir com o resultado (S/N): '))
+resp = resp.upper().replace(' ', '')
+if resp == 'S':
+  print('\nSeguimos com o script (composição e reprojeção da imagem)...')
+  pass
+else:
+  print('Interrompendo execução...\n\n')
+  sys.exit()
+
+#COMPOSIÇÃO RGB654 PARA IMAGENS LANDSAT-9
+compositeBands(imageName, R=B06, G=B05, B=B04)
+
+path_file = url_id + imageName_proj
+reprojectRaster(src_file=imageName, dst_file=path_file, dst_crs=dst_crs)
+
+os.rename(imageName_proj, imageName_final)
+
+removePath = url_id + imageName
+os.remove(removePath)
+
+print('\n...')
+print('Procedimento finalizado e pronto para seguir!')
+
+#Imagens Sentinel-2 (RBG/483)
+
+#@title
+if download_st2 == 'N':
+  print('Imagens Sentinel-2 canceladas! Parando ambiente de execução e removendo arquivos shapefile..\n\n')
+
+  for root, dirs, files in os.walk(url_id):
+    for name in files:
+      if name.startswith('Limite_Matricula_'):
+        removePath = url_id + name
+        os.remove(removePath)
+
+      elif name.startswith('Limite_Propriedade_'):
+        removePath = url_id + name
+        os.remove(removePath)
+
+      elif name.startswith('Uso_do_Solo_'):
+        removePath = url_id + name
+        os.remove(removePath)
+
+      else:
+        pass
+  sys.exit()
+
+else:
+  print('Seguindo com a escolha das imagens Sentinel-2...')
+
+#@title
+# Deixa a data adequada para a busca no Computador Planetário (apenas imagem Sentinel-2)
+timeRange = min_data_st2 + '/' + today_format
+
+# Faz a busca no catálogo conforme os parâmetros indicados
+search = catalog.search(collections=['sentinel-2-l2a'], bbox=bbox, datetime=timeRange)
+items = search.get_all_items()
+
+print(f'Número de imagens Sentinel-2 encontradas: {len(items)}\n')
+
+# Cria um dataframe com as imagens encontradas
+df = gpd.GeoDataFrame.from_features(items.to_dict(), crs='epsg:4326')
+
+# Imprime a lista de imagens encontradas (.head() limita entre as cinco primeiras. Basta remover para ter acesso a todas as imagens)
+df[['datetime', 's2:product_uri', 'eo:cloud_cover']]
+
+#@title
+st2 = int(input('Escolha uma imagem Sentinel-2 (apenas o número): '))
+selected_item = items[st2]
+
+print(f'\nVocê escolheu a imagem {selected_item.id} com data de {selected_item.datetime.date()} e com {round(selected_item.properties["eo:cloud_cover"], 2)}% de nuvem. Vamos visualizar a cena...\n')
+
+imageName_temp = selected_item.properties['s2:product_uri'].split('_')
+imageName = f'{imageName_temp[2]}_{imageName_temp[1]}.tif'
+imageName_proj = f'{imageName.split(".")[0]}_WGS84.tif'
+titulo = f'Imagem MSI/Sentinel-2 de {imageName_temp[2][6:8]}/{imageName_temp[2][4:6]}/{imageName_temp[2][0:4]}'
+imageName_final = f'Imagem MSI Sentinel-2 de {imageName_temp[2][6:8]}.{imageName_temp[2][4:6]}.{imageName_temp[2][0:4]}.tif'
+
+visual = rio.open(selected_item.assets['visual'].href)
+plotImage(shapefile=mat, raster=visual)
+
+#@title
+resp = str(input('Seguir com o resultado (S/N): '))
+resp = resp.upper().replace(' ', '')
+if resp == 'S':
+  print('\nSeguimos com o script (composição e reprojeção da imagem)...')
+  pass
+else:
+  print('Interrompendo execução...\n\n')
+  sys.exit()
+
+#Definição das bandas
+B03 = rio.open(selected_item.assets['B03'].href)
+B04 = rio.open(selected_item.assets['B04'].href)
+B08 = rio.open(selected_item.assets['B08'].href)
+
+#COMPOSIÇÃO RGB458 PARA IMAGENS SENTINEL-2
+compositeBands(imageName, R=B04, G=B08, B=B03)
+
+# Parâmetros de entrada da função
+path_file = url_id + imageName_proj #Caminho e nome de onde irá salvar
+# dst_crs = rio.crs.CRS.from_epsg(4326) #Geográfica, WGS84
+
+# Executa a função que reprojeta as bandas
+reprojectRaster(src_file=imageName, dst_file=imageName_proj, dst_crs=dst_crs)
+
+# Renomeia o arquivo da maneira que ficou acordado para utilizar nos mapas automáticos
+os.rename(imageName_proj, imageName_final)
+
+# Apaga arquivo raster sem utilidade
+removePath = url_id + imageName
+os.remove(removePath)
+
+print('\n...')
+print('Procedimento finalizado e pronto para seguir!')
+
+#Remove o Limite da propriedade ou matricula
+#@title
+for root, dirs, files in os.walk(url_id):
+  for name in files:
+    if name.startswith('Limite_Matricula_'):
+      removePath = url_id + name
+      os.remove(removePath)
+
+    elif name.startswith('Limite_Propriedade_'):
+      removePath = url_id + name
+      os.remove(removePath)
+
+    elif name.startswith('Uso_do_Solo_'):
+      removePath = url_id + name
+      os.remove(removePath)
+
+    else:
+      pass
